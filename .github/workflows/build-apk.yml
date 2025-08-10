@@ -1,25 +1,75 @@
 name: Build APK
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
+  push: { branches: [ main ] }
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Quick repo snapshot
+        run: |
+          echo "PWD=$(pwd)"
+          ls -la
+          echo "-- find gradle files --"
+          find . -maxdepth 3 -name "build.gradle*" -o -name "settings.gradle" -o -name "gradlew" | sort
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: android-actions/setup-android@v3
-      - name: Inject OpenAI key
+
+      - name: Inject OpenAI key into local.properties
         run: echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> local.properties
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
-      - name: Build Debug APK
-        run: ./gradlew :app:assembleDebug
-      - uses: actions/upload-artifact@v4
+
+      - name: Bootstrap Gradle if wrapper missing
+        run: |
+          if [ ! -f gradlew ]; then
+            echo "No gradlew found, bootstrapping Gradle 8.7…"
+            curl -sLo gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+            unzip -q gradle.zip
+            export PATH="$PWD/gradle-8.7/bin:$PATH"
+            gradle --version
+            gradle wrapper --gradle-version 8.7
+          fi
+          chmod +x gradlew
+
+      - name: Try :app:assembleDebug
+        id: build1
+        continue-on-error: true
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Fallback assembleDebug (root)
+        if: steps.build1.outcome != 'success'
+        id: build2
+        continue-on-error: true
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Fail if both attempts failed
+        if: steps.build1.outcome != 'success' && steps.build2.outcome != 'success'
+        run: |
+          echo "Both build attempts failed."
+          exit 1
+
+      - name: Upload APK artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: app-debug.apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            **/outputs/apk/**/app-*-debug*.apk
+          if-no-files-found: warn
+
+      - name: Upload logs & reports (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-logs
+          path: |
+            **/build/reports/**
+            **/*.log
+            ./**/outputs/logs/**
